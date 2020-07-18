@@ -17,6 +17,15 @@ def slavePodTemplate = """
                   - jenkins-jenkins-master
               topologyKey: "kubernetes.io/hostname"
         containers:
+        - name: buildtools
+          image: fuchicorp/buildtools
+          imagePullPolicy: IfNotPresent
+          command:
+          - cat
+          tty: true
+          volumeMounts:
+            - mountPath: /var/run/docker.sock
+              name: docker-sock
         - name: docker
           image: docker:latest
           imagePullPolicy: IfNotPresent
@@ -37,29 +46,65 @@ def slavePodTemplate = """
     """
     properties([
         parameters([
-            booleanParam(defaultValue: false, description: 'Please select to apply the changes ', name: 'terraformApply'), 
-            booleanParam(defaultValue: false, description: 'Please select to destroy all', name: 'terraformDestroy')
+            booleanParam(defaultValue: false, description: 'Please select to apply the changes ', name: 'terraformApply'),
+            booleanParam(defaultValue: false, description: 'Please select to destroy all ', name: 'terraformDestroy'), 
+            choice(choices: ['us-west-2', 'us-west-1', 'us-east-2', 'us-east-1', 'eu-west-1'], description: 'Please select the region', name: 'aws_region'),
+            properties([
+              parameters([
+                choice(choices: ['dev', 'qa', 'stage', 'prod'], 
+                description: 'please select the env', name: 'env')])])
         ])
     ])
     podTemplate(name: k8slabel, label: k8slabel, yaml: slavePodTemplate, showRawYaml: false) {
       node(k8slabel) {
         stage("Pull SCM") {
-            git 'https://github.com/fsadykov/jenkins-instance.git'
+            git 'https://github.com/tuyalou/jenkins-instance.git'
         }
         stage("Generate Variables") {
             println("Generate Variables")
         }
-        stage("Terraform Apply/plan") {
-            if (params.terraformApply) {
-                println("Applying the changes")
-            } else {
-                println("Planing the changes")
+        container("buildtools") {
+            dir('deployments/terraform') {
+                withCredentials([usernamePassword(credentialsId: 'packer-build-creds', 
+                    passwordVariable: 'AWS_SECRET_ACCESS_KEY', usernameVariable: 'AWS_ACCESS_KEY_ID')]) {
+                    stage("Terraform Apply/plan") {
+                        if (!params.terraformDestroy) {
+                            if (params.terraformApply) {
+                                println("Applying the changes")
+                                sh """
+                                #!/bin/bash
+                                export AWS_DEFAULT_REGION=${aws_region}
+                                source ./setenv.sh dev.tfvars
+                                terraform apply -auto-approve 
+                                """
+                            } else {
+                                println("Planing the changes")
+                                sh """
+                                #!/bin/bash
+                                set +ex
+                                ls -l
+                                export AWS_DEFAULT_REGION=${aws_region}
+                                source ./setenv.sh dev.tfvars
+                                terraform plan
+                                """
+                            }
+                        }
+                    }
+                    stage("Terraform Destroy") {
+                        if (params.terraformDestroy) {
+                            println("Destroying the all")
+                            sh """
+                            #!/bin/bash
+                            export AWS_DEFAULT_REGION=${aws_region}
+                            source ./setenv.sh dev.tfvars
+                            terraform destroy -auto-approve 
+                            """
+                        } else {
+                            println("Skiping the destroy")
+                        }
+                    }
+                }
             }
-        }
-        stage("Terraform Destroy") {
-            if (terraformDestroy) {
-                println("Destroying the all")
-            } 
         }
       }
     }
